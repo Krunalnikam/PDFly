@@ -1,0 +1,6 @@
+{
+  "name": "Assignment Buddy",
+  "description": "Convert assignment photos to formatted submission PDFs with document scanner auto-crop, perspective correction, and student details.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
