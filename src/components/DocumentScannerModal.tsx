@@ -17,6 +17,9 @@ import { Badge } from "@/components/ui/badge";
 import {
   type Corner,
   type Quad,
+  CONFIDENCE_THRESHOLD,
+  AUTO_CROP_PAD_FACTOR,
+  padQuad,
   detectDocument,
   warpQuad,
   rotateImage,
@@ -25,6 +28,7 @@ import {
   dist,
 } from "@/lib/page-scan";
 import type { UploadedImage } from "@/lib/assignment-pdf";
+import { useLanguage } from "@/lib/i18n";
 
 type DocumentScannerModalProps = {
   image: UploadedImage | null;
@@ -41,7 +45,6 @@ type DocumentScannerModalProps = {
   onRevertToOriginal: (id: string) => void;
 };
 
-const CORNER_NAMES = ["Top-Left", "Top-Right", "Bottom-Right", "Bottom-Left"] as const;
 const CORNER_ABBR = ["TL", "TR", "BR", "BL"] as const;
 
 export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = (props) => {
@@ -56,6 +59,13 @@ const ScannerModalDialog: React.FC<DocumentScannerModalProps & { image: Uploaded
   onApply,
   onRevertToOriginal,
 }) => {
+  const { t } = useLanguage();
+  const CORNER_NAMES = [
+    t("cornerTopLeft"),
+    t("cornerTopRight"),
+    t("cornerBottomRight"),
+    t("cornerBottomLeft"),
+  ] as const;
   // Active working image dataUrl (may be rotated during edit session)
   const [workingDataUrl, setWorkingDataUrl] = useState<string>(
     image.originalDataUrl || image.dataUrl,
@@ -98,8 +108,15 @@ const ScannerModalDialog: React.FC<DocumentScannerModalProps & { image: Uploaded
         try {
           const res = await detectDocument(initDataUrl);
           if (isMounted) {
-            setCorners(res.quad);
-            setInitialCorners(res.quad);
+            if (res.isConfident && res.confidence >= CONFIDENCE_THRESHOLD) {
+              const padded = padQuad(res.quad, AUTO_CROP_PAD_FACTOR);
+              setCorners(padded);
+              setInitialCorners(padded);
+            } else {
+              const fallback = FULL_QUAD();
+              setCorners(fallback);
+              setInitialCorners(fallback);
+            }
             setConfidence(res.confidence);
           }
         } catch {
@@ -148,7 +165,12 @@ const ScannerModalDialog: React.FC<DocumentScannerModalProps & { image: Uploaded
     setIsDetecting(true);
     try {
       const res = await detectDocument(workingDataUrl);
-      setCorners(res.quad);
+      if (res.isConfident && res.confidence >= CONFIDENCE_THRESHOLD) {
+        const padded = padQuad(res.quad, AUTO_CROP_PAD_FACTOR);
+        setCorners(padded);
+      } else {
+        setCorners(FULL_QUAD());
+      }
       setConfidence(res.confidence);
     } catch {
       setCorners(FULL_QUAD());
@@ -286,20 +308,18 @@ const ScannerModalDialog: React.FC<DocumentScannerModalProps & { image: Uploaded
             <div>
               <div className="flex items-center gap-2">
                 <h2 className="text-base font-semibold sm:text-lg">
-                  Document Scanner & Crop — Page {pageNumber}
+                  {t("scannerTitle", { page: pageNumber })}
                 </h2>
                 {image.isCropped && (
                   <Badge
                     variant="outline"
                     className="border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
                   >
-                    Cropped
+                    {t("croppedBadge")}
                   </Badge>
                 )}
               </div>
-              <p className="text-xs text-muted-foreground">
-                Detects outer physical paper edges. All blank areas and page margins are preserved.
-              </p>
+              <p className="text-xs text-muted-foreground">{t("scannerDesc")}</p>
             </div>
           </div>
 
@@ -316,7 +336,7 @@ const ScannerModalDialog: React.FC<DocumentScannerModalProps & { image: Uploaded
                 }`}
               >
                 <Crop className="h-3.5 w-3.5" />
-                Adjust Corners
+                {t("adjustCornersTab")}
               </button>
               <button
                 type="button"
@@ -328,7 +348,7 @@ const ScannerModalDialog: React.FC<DocumentScannerModalProps & { image: Uploaded
                 }`}
               >
                 <Eye className="h-3.5 w-3.5" />
-                Straightened Preview
+                {t("straightenedPreviewTab")}
               </button>
             </div>
 
@@ -337,7 +357,7 @@ const ScannerModalDialog: React.FC<DocumentScannerModalProps & { image: Uploaded
               size="icon"
               onClick={onClose}
               className="h-8 w-8 text-muted-foreground hover:text-foreground"
-              aria-label="Close scanner"
+              aria-label={t("closeScanner")}
             >
               <X className="h-4 w-4" />
             </Button>
@@ -348,10 +368,7 @@ const ScannerModalDialog: React.FC<DocumentScannerModalProps & { image: Uploaded
         {isLowConfidence && !isDetecting && activeTab === "edit" && (
           <div className="flex items-center gap-2.5 border-b border-amber-500/20 bg-amber-500/10 px-4 py-2 text-xs text-amber-700 dark:text-amber-300 sm:px-6">
             <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
-            <p>
-              Outer paper boundary was ambiguous, so the full page is preserved. You can drag corner
-              handles to crop desk background or keep full frame.
-            </p>
+            <p>{t("lowConfidenceWarning")}</p>
           </div>
         )}
 
@@ -360,9 +377,7 @@ const ScannerModalDialog: React.FC<DocumentScannerModalProps & { image: Uploaded
           {isDetecting && (
             <div className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-black/60 backdrop-blur-xs">
               <Loader2 className="h-8 w-8 animate-spin text-primary" />
-              <p className="mt-2 text-sm font-medium text-white">
-                Detecting physical paper boundary...
-              </p>
+              <p className="mt-2 text-sm font-medium text-white">{t("detectingBoundary")}</p>
             </div>
           )}
 
@@ -491,7 +506,7 @@ const ScannerModalDialog: React.FC<DocumentScannerModalProps & { image: Uploaded
               {isWarping ? (
                 <div className="flex flex-col items-center justify-center text-muted-foreground">
                   <Loader2 className="h-8 w-8 animate-spin text-primary" />
-                  <p className="mt-2 text-xs font-medium">Applying perspective warp...</p>
+                  <p className="mt-2 text-xs font-medium">{t("applyingWarp")}</p>
                 </div>
               ) : previewWarpUrl ? (
                 <div className="flex max-h-full max-w-full flex-col items-center justify-center">
@@ -502,11 +517,11 @@ const ScannerModalDialog: React.FC<DocumentScannerModalProps & { image: Uploaded
                   />
                   <div className="mt-2 flex items-center gap-1.5 text-xs text-muted-foreground">
                     <Check className="h-3.5 w-3.5 text-emerald-500" />
-                    Perspective corrected & straightened
+                    {t("perspectiveStraightenedSuccess")}
                   </div>
                 </div>
               ) : (
-                <p className="text-xs text-muted-foreground">Could not generate preview.</p>
+                <p className="text-xs text-muted-foreground">{t("previewFailed")}</p>
               )}
             </div>
           )}
@@ -523,10 +538,10 @@ const ScannerModalDialog: React.FC<DocumentScannerModalProps & { image: Uploaded
               onClick={runAutoDetect}
               disabled={isDetecting || activeTab === "preview"}
               className="gap-1.5 text-xs"
-              title="Detect outer physical paper edges"
+              title={t("scannerDesc")}
             >
               <Sparkles className="h-3.5 w-3.5 text-primary" />
-              Auto Detect Page
+              {t("autoDetectPage")}
             </Button>
 
             <Button
@@ -536,10 +551,10 @@ const ScannerModalDialog: React.FC<DocumentScannerModalProps & { image: Uploaded
               onClick={handleSetFullPage}
               disabled={isDetecting || activeTab === "preview"}
               className="gap-1.5 text-xs text-muted-foreground hover:text-foreground"
-              title="Set crop corners to full image frame"
+              title={t("fullFrame")}
             >
               <Maximize2 className="h-3.5 w-3.5" />
-              Full Frame
+              {t("fullFrame")}
             </Button>
 
             <div className="flex items-center rounded-md border border-border bg-background p-0.5 shadow-2xs">
@@ -550,11 +565,11 @@ const ScannerModalDialog: React.FC<DocumentScannerModalProps & { image: Uploaded
                 onClick={() => handleRotate(-90)}
                 disabled={isDetecting || isWarping}
                 className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground gap-1"
-                title="Rotate Left 90° (Counter-Clockwise)"
-                aria-label="Rotate document left 90 degrees"
+                title={t("rotateLeftTitle")}
+                aria-label={t("rotateLeftTitle")}
               >
                 <RotateCcw className="h-3.5 w-3.5" />
-                <span className="hidden sm:inline text-[11px]">Rotate Left</span>
+                <span className="hidden sm:inline text-[11px]">{t("rotateLeft")}</span>
               </Button>
 
               <Button
@@ -564,11 +579,11 @@ const ScannerModalDialog: React.FC<DocumentScannerModalProps & { image: Uploaded
                 onClick={() => handleRotate(90)}
                 disabled={isDetecting || isWarping}
                 className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground gap-1"
-                title="Rotate Right 90° (Clockwise)"
-                aria-label="Rotate document right 90 degrees"
+                title={t("rotateRightTitle")}
+                aria-label={t("rotateRightTitle")}
               >
                 <RotateCw className="h-3.5 w-3.5" />
-                <span className="hidden sm:inline text-[11px]">Rotate Right</span>
+                <span className="hidden sm:inline text-[11px]">{t("rotateRight")}</span>
               </Button>
             </div>
 
@@ -581,7 +596,7 @@ const ScannerModalDialog: React.FC<DocumentScannerModalProps & { image: Uploaded
               className="h-8 text-xs text-muted-foreground hover:text-foreground"
             >
               <Undo2 className="mr-1 h-3.5 w-3.5" />
-              Reset
+              {t("reset")}
             </Button>
           </div>
 
@@ -594,7 +609,7 @@ const ScannerModalDialog: React.FC<DocumentScannerModalProps & { image: Uploaded
               onClick={handleUseOriginal}
               className="text-xs text-muted-foreground hover:text-foreground"
             >
-              No Crop / Use Original
+              {t("useOriginalNoCrop")}
             </Button>
 
             <Button
@@ -607,12 +622,12 @@ const ScannerModalDialog: React.FC<DocumentScannerModalProps & { image: Uploaded
               {isWarping ? (
                 <>
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  Applying...
+                  {t("applyingScan")}
                 </>
               ) : (
                 <>
                   <Check className="h-3.5 w-3.5" />
-                  Apply Scan
+                  {t("applyScan")}
                 </>
               )}
             </Button>

@@ -13,6 +13,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { StudentProfile } from "@/types";
 import { saveStudentProfile } from "@/lib/profile";
+import { useLanguage } from "@/lib/i18n";
 
 interface ProfileEditModalProps {
   isOpen: boolean;
@@ -31,6 +32,7 @@ export function ProfileEditModal({
   title,
   description,
 }: ProfileEditModalProps) {
+  const { t } = useLanguage();
   const [branch, setBranch] = useState("");
   const [enrollmentNumber, setEnrollmentNumber] = useState("");
   const [errors, setErrors] = useState<{ branch?: string; enrollmentNumber?: string }>({});
@@ -53,10 +55,10 @@ export function ProfileEditModal({
     const newErrors: { branch?: string; enrollmentNumber?: string } = {};
 
     if (!branch.trim()) {
-      newErrors.branch = "Branch is required (e.g., CE, IT, ME)";
+      newErrors.branch = t("branchRequiredError");
     }
     if (!enrollmentNumber.trim()) {
-      newErrors.enrollmentNumber = "Enrollment number is required (e.g., 25002170110091)";
+      newErrors.enrollmentNumber = t("enrollmentRequiredError");
     }
 
     if (Object.keys(newErrors).length > 0) {
@@ -83,14 +85,13 @@ export function ProfileEditModal({
               <GraduationCap className="h-5 w-5" />
             </div>
             <DialogTitle className="text-lg">
-              {title || (isEditing ? "Edit Student Details" : "Student Profile Registration")}
+              {title ||
+                (isEditing ? t("editStudentDetailsTitle") : t("studentProfileRegistrationTitle"))}
             </DialogTitle>
           </div>
           <DialogDescription className="text-xs text-muted-foreground">
             {description ||
-              (isEditing
-                ? "Update your saved Branch and Enrollment Number for future PDF submissions."
-                : "Save your Branch and Enrollment Number once. They will be stored in your browser and automatically used for all PDF assignments.")}
+              (isEditing ? t("editStudentDetailsDesc") : t("studentProfileRegistrationDesc"))}
           </DialogDescription>
         </DialogHeader>
 
@@ -101,7 +102,7 @@ export function ProfileEditModal({
               className="text-xs font-semibold flex items-center gap-1.5"
             >
               <Building2 className="h-3.5 w-3.5 text-primary" />
-              Branch *
+              {t("branchRequired")}
             </Label>
             <Input
               id="modal-branch"
@@ -119,9 +120,7 @@ export function ProfileEditModal({
             {errors.branch ? (
               <p className="text-xs text-destructive">{errors.branch}</p>
             ) : (
-              <p className="text-[10px] text-muted-foreground">
-                Your college/engineering branch code
-              </p>
+              <p className="text-[10px] text-muted-foreground">{t("branchCodeHelp")}</p>
             )}
           </div>
 
@@ -131,7 +130,7 @@ export function ProfileEditModal({
               className="text-xs font-semibold flex items-center gap-1.5"
             >
               <Hash className="h-3.5 w-3.5 text-primary" />
-              Enrollment Number *
+              {t("enrollmentRequired")}
             </Label>
             <Input
               id="modal-enrollment"
@@ -149,9 +148,7 @@ export function ProfileEditModal({
             {errors.enrollmentNumber ? (
               <p className="text-xs text-destructive">{errors.enrollmentNumber}</p>
             ) : (
-              <p className="text-[10px] text-muted-foreground">
-                Your university student ID or roll number
-              </p>
+              <p className="text-[10px] text-muted-foreground">{t("enrollmentHelp")}</p>
             )}
           </div>
 
@@ -165,12 +162,12 @@ export function ProfileEditModal({
           <DialogFooter className="gap-2 sm:gap-0 pt-2">
             {isEditing && (
               <Button type="button" variant="outline" size="sm" onClick={onClose}>
-                Cancel
+                {t("cancel")}
               </Button>
             )}
             <Button type="submit" size="sm" className="gap-1.5">
               <Check className="h-4 w-4" />
-              {isEditing ? "Save Changes" : "Save Profile Details"}
+              {t("saveStudentDetailsBtn")}
             </Button>
           </DialogFooter>
         </form>

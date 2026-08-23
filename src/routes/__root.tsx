@@ -11,6 +11,9 @@ import { useEffect, type ReactNode } from "react";
 
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
+import { ThemeProvider } from "../lib/theme";
+import { LanguageProvider } from "../lib/i18n";
+import { trackWebsiteVisit } from "../lib/analytics";
 
 function NotFoundComponent() {
   return (
@@ -77,21 +80,56 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "Lovable App" },
-      { name: "description", content: "Lovable Generated Project" },
-      { name: "author", content: "Lovable" },
-      { property: "og:title", content: "Lovable App" },
-      { property: "og:description", content: "Lovable Generated Project" },
+      { title: "Assignment PDF Maker" },
+      {
+        name: "description",
+        content:
+          "Convert assignment photos to clean submission PDFs with automatic edge crop, smart document filter, and formatted roll number details.",
+      },
+      { name: "author", content: "Assignment PDF Maker" },
+      { property: "og:site_name", content: "Assignment PDF Maker" },
+      { property: "og:title", content: "Assignment PDF Maker" },
+      {
+        property: "og:description",
+        content:
+          "Convert assignment photos to clean submission PDFs with automatic edge crop, smart document filter, and formatted roll number details.",
+      },
       { property: "og:type", content: "website" },
+      {
+        property: "og:image",
+        content:
+          "https://ais-pre-basigisqi2zkqajj5ho7om-201157422726.asia-southeast1.run.app/og-image.png",
+      },
+      {
+        property: "og:image:secure_url",
+        content:
+          "https://ais-pre-basigisqi2zkqajj5ho7om-201157422726.asia-southeast1.run.app/og-image.png",
+      },
+      { property: "og:image:type", content: "image/png" },
+      { property: "og:image:width", content: "1200" },
+      { property: "og:image:height", content: "630" },
+      { property: "og:image:alt", content: "Assignment PDF Maker Logo and Scanner Preview" },
       { name: "twitter:card", content: "summary_large_image" },
-      { name: "twitter:site", content: "@Lovable" },
+      { name: "twitter:title", content: "Assignment PDF Maker" },
+      {
+        name: "twitter:description",
+        content:
+          "Convert assignment photos to clean submission PDFs with automatic edge crop, smart document filter, and formatted roll number details.",
+      },
+      {
+        name: "twitter:image",
+        content:
+          "https://ais-pre-basigisqi2zkqajj5ho7om-201157422726.asia-southeast1.run.app/og-image.png",
+      },
     ],
     links: [
       {
         rel: "stylesheet",
         href: appCss,
       },
+      { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" },
       { rel: "icon", href: "/favicon.ico", type: "image/x-icon" },
+      { rel: "apple-touch-icon", href: "/apple-touch-icon.png" },
     ],
   }),
   shellComponent: RootShell,
@@ -102,8 +140,22 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
 
 function RootShell({ children }: { children: ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `
+              try {
+                var savedTheme = localStorage.getItem('assignment_pdf_theme');
+                if (savedTheme === 'dark') {
+                  document.documentElement.classList.add('dark');
+                } else {
+                  document.documentElement.classList.remove('dark');
+                }
+              } catch (e) {}
+            `,
+          }}
+        />
         <HeadContent />
       </head>
       <body>
@@ -117,10 +169,18 @@ function RootShell({ children }: { children: ReactNode }) {
 function RootComponent() {
   const { queryClient } = Route.useRouteContext();
 
+  useEffect(() => {
+    trackWebsiteVisit();
+  }, []);
+
   return (
     <QueryClientProvider client={queryClient}>
-      {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
-      <Outlet />
+      <ThemeProvider>
+        <LanguageProvider>
+          {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
+          <Outlet />
+        </LanguageProvider>
+      </ThemeProvider>
     </QueryClientProvider>
   );
 }

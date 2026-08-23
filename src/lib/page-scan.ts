@@ -17,6 +17,7 @@ export type { Quad, DetectionResult };
 export type Detection = DetectionResult;
 
 export const CONFIDENCE_THRESHOLD = 0.48;
+export const AUTO_CROP_PAD_FACTOR = 0.012;
 
 /** The entire uncropped image frame (0-1 in all dimensions). */
 export const FULL_QUAD = (): Quad => [
@@ -381,6 +382,8 @@ export async function warpQuad(dataUrl: string, quad: Quad, maxDim = 2400) {
   }
   octx.putImageData(outImage, 0, 0);
   const resultDataUrl = out.toDataURL("image/jpeg", 0.95);
+  out.width = 1;
+  out.height = 1;
 
   return { dataUrl: resultDataUrl, width: w, height: h };
 }
@@ -398,10 +401,45 @@ export async function rotateImage(dataUrl: string, degrees: 90 | 180 | 270 | -90
   ctx.translate(canvas.width / 2, canvas.height / 2);
   ctx.rotate((degrees * Math.PI) / 180);
   ctx.drawImage(img, -iw / 2, -ih / 2);
-  return canvas.toDataURL("image/jpeg", 0.95);
+  const rotated = canvas.toDataURL("image/jpeg", 0.95);
+  canvas.width = 1;
+  canvas.height = 1;
+  return rotated;
 }
 
 export const imageSize = async (dataUrl: string) => {
   const img = await loadImage(dataUrl);
   return { width: img.naturalWidth, height: img.naturalHeight };
 };
+
+/**
+ * Automatically crops and straightens a document image by detecting outer paper sheet boundaries.
+ * Preserves the full physical sheet of paper, margins, and content.
+ */
+export async function autoCropImage(dataUrl: string): Promise<{
+  dataUrl: string;
+  isCropped: boolean;
+  quad?: Quad;
+  confidence?: number;
+}> {
+  const detection = await detectDocument(dataUrl);
+
+  if (detection.isConfident && detection.confidence >= CONFIDENCE_THRESHOLD) {
+    const paddedQuad = padQuad(detection.quad, AUTO_CROP_PAD_FACTOR);
+    const warped = await warpQuad(dataUrl, paddedQuad, 2200);
+    return {
+      dataUrl: warped.dataUrl,
+      isCropped: true,
+      quad: paddedQuad,
+      confidence: detection.confidence,
+    };
+  }
+
+  // If confidence is below threshold, preserve the complete original image without aggressive/risky cropping
+  return {
+    dataUrl,
+    isCropped: false,
+    quad: FULL_QUAD(),
+    confidence: detection.confidence,
+  };
+}

@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="blueGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2563EB" />
+      <stop offset="100%" stop-color="#4F46E5" />
+    </linearGradient>
+    <linearGradient id="accentGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#EF4444" />
+      <stop offset="100%" stop-color="#DC2626" />
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="2" stdDeviation="2" flood-color="#000" flood-opacity="0.2" />
+    </filter>
+  </defs>
+  
+  <!-- Background rounded squircle -->
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#blueGrad)" />
+  
+  <!-- Sheet of paper -->
+  <path d="M18 14h18l12 12v22a2 2 0 0 1-2 2H18a2 2 0 0 1-2-2V16a2 2 0 0 1 2-2z" fill="#FFFFFF" filter="url(#shadow)" />
+  
+  <!-- Folded corner -->
+  <path d="M36 14v10a2 2 0 0 0 2 2h10" fill="#E2E8F0" />
+  
+  <!-- Document Lines -->
+  <line x1="22" y1="28" x2="32" y2="28" stroke="#3B82F6" stroke-width="2.5" stroke-linecap="round" />
+  <line x1="22" y1="34" x2="42" y2="34" stroke="#94A3B8" stroke-width="2.5" stroke-linecap="round" />
+  <line x1="22" y1="40" x2="36" y2="40" stroke="#94A3B8" stroke-width="2.5" stroke-linecap="round" />
+
+  <!-- Scanner Optical Line -->
+  <line x1="12" y1="31" x2="52" y2="31" stroke="#38BDF8" stroke-width="2" stroke-linecap="round" stroke-dasharray="2 3" opacity="0.9" />
+
+  <!-- PDF Badge -->
+  <rect x="25" y="42" width="25" height="13" rx="3" fill="url(#accentGrad)" />
+  <text x="37.5" y="51.5" fill="#FFFFFF" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="8" font-weight="900" text-anchor="middle" letter-spacing="0.5">PDF</text>
+</svg>

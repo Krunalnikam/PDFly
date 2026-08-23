@@ -1,9 +1,10 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useBlocker } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowDown,
   ArrowUp,
+  ArrowUpDown,
   Building2,
   CheckCircle2,
   Crop,
@@ -13,6 +14,7 @@ import {
   Hash,
   ImagePlus,
   Loader2,
+  MessageSquareQuote,
   RotateCcw,
   RotateCw,
   Sliders,
@@ -34,12 +36,25 @@ import {
   QUALITY_PRESETS,
   type PdfQualityPreset,
   type UploadedImage,
+  type PdfGenerationProgress,
 } from "@/lib/assignment-pdf";
-import { detectDocument, rotateImage, rotateQuad, warpQuad, type Quad } from "@/lib/page-scan";
+import {
+  detectDocument,
+  rotateImage,
+  rotateQuad,
+  warpQuad,
+  type Quad,
+  autoCropImage,
+  FULL_QUAD,
+} from "@/lib/page-scan";
 import { DocumentScannerModal } from "@/components/DocumentScannerModal";
 import { ProfileEditModal } from "@/components/ProfileEditModal";
+import { FeedbackModal } from "@/components/FeedbackModal";
+import { AdminFeedbackModal } from "@/components/AdminFeedbackModal";
+import { SettingsMenu } from "@/components/SettingsMenu";
 import { getSavedProfile, saveStudentProfile } from "@/lib/profile";
 import { StudentProfile } from "@/types";
+import { useLanguage } from "@/lib/i18n";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -66,15 +81,18 @@ type Errors = Partial<
 >;
 
 function Index() {
+  const { t } = useLanguage();
   const [profile, setProfile] = useState<StudentProfile | null>(null);
   const [profileModalOpen, setProfileModalOpen] = useState(false);
+  const [feedbackModalOpen, setFeedbackModalOpen] = useState(false);
+  const [adminFeedbackModalOpen, setAdminFeedbackModalOpen] = useState(false);
   const [branchInput, setBranchInput] = useState("");
   const [enrollmentInput, setEnrollmentInput] = useState("");
   const [subject, setSubject] = useState("");
   const [examPhase, setExamPhase] = useState("");
   const [images, setImages] = useState<UploadedImage[]>([]);
-  const [smartFilterEnabled, setSmartFilterEnabled] = useState(true);
-  const [qualityPreset, setQualityPreset] = useState<PdfQualityPreset>("standard");
+  const [smartFilterEnabled, setSmartFilterEnabled] = useState(false);
+  const [qualityPreset, setQualityPreset] = useState<PdfQualityPreset>("compact");
   const [rotatingId, setRotatingId] = useState<string | null>(null);
   const [errors, setErrors] = useState<Errors>({});
   const [isGenerating, setIsGenerating] = useState(false);
@@ -84,6 +102,9 @@ function Index() {
     image: UploadedImage;
     pageNumber: number;
   } | null>(null);
+
+  const [generationProgress, setGenerationProgress] = useState<PdfGenerationProgress | null>(null);
+  const [generationError, setGenerationError] = useState<string | null>(null);
 
   const [result, setResult] = useState<{
     fileName: string;
@@ -95,6 +116,63 @@ function Index() {
   const [notices, setNotices] = useState<string[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const createdBlobUrlsRef = useRef<Set<string>>(new Set());
+
+  const activeBranch = profile ? profile.branch : branchInput.trim().toUpperCase();
+  const activeEnrollmentNumber = profile ? profile.enrollmentNumber : enrollmentInput.trim();
+
+  // Unsaved Work Protection detection
+  const hasUnsavedImages = images.length > 0;
+  const hasUnsavedFields =
+    Boolean(subject.trim()) ||
+    Boolean(examPhase.trim()) ||
+    (!profile && (Boolean(branchInput.trim()) || Boolean(enrollmentInput.trim())));
+  const hasUnsavedWork = (hasUnsavedImages || hasUnsavedFields) && result === null;
+
+  // 1. Browser-level Unsaved Work Protection (page refresh, tab close, window close)
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (hasUnsavedWork) {
+        e.preventDefault();
+        e.returnValue = t("unsavedWorkWarning");
+        return t("unsavedWorkWarning");
+      }
+    };
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
+  }, [hasUnsavedWork, t]);
+
+  // 2. SPA-level Unsaved Work Protection (in-app navigation, browser back)
+  useBlocker({
+    shouldBlockFn: () => {
+      if (!hasUnsavedWork) return false;
+      const shouldLeave = window.confirm(t("unsavedWorkWarning"));
+      return !shouldLeave;
+    },
+  });
+
+  const getProgressLabel = () => {
+    if (!generationProgress) return t("generatingPdf");
+    switch (generationProgress.stage) {
+      case "preparing":
+        return t("pdfStagePreparing");
+      case "processing":
+        return t("pdfStageProcessing", {
+          current: generationProgress.current ?? 1,
+          total: generationProgress.total ?? images.length,
+        });
+      case "creating":
+        return t("pdfStageCreating");
+      case "finalizing":
+        return t("pdfStageFinalizing");
+      case "ready":
+        return t("pdfStageReady");
+      default:
+        return t("generatingPdf");
+    }
+  };
 
   // Load saved student profile from localStorage on mount
   useEffect(() => {
@@ -112,7 +190,10 @@ function Index() {
     setEnrollmentInput(newProfile.enrollmentNumber);
     setErrors((prev) => ({ ...prev, branch: undefined, enrollmentNumber: undefined }));
     notify(
-      `Saved details: Branch ${newProfile.branch} · Enrollment No ${newProfile.enrollmentNumber}`,
+      t("savedDetailsNotify", {
+        branch: newProfile.branch,
+        enrollment: newProfile.enrollmentNumber,
+      }),
     );
   };
 
@@ -135,14 +216,15 @@ function Index() {
 
   const handleFiles = (files: FileList | null) => {
     if (!files || files.length === 0) return;
-    const accepted = Array.from(files).filter((f) =>
-      ["image/jpeg", "image/jpg", "image/png", "image/webp"].includes(f.type),
+    const accepted = Array.from(files).filter(
+      (f) => f.type.startsWith("image/") || /\.(jpe?g|png|webp|bmp|gif|jfif|heic)$/i.test(f.name),
     );
     if (accepted.length === 0) return;
 
-    // Instantly create object URLs so all selected images appear in the preview immediately (0ms delay)
-    const newImages: UploadedImage[] = accepted.map((file) => {
-      const id = `${file.name}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    // Map files in the exact sequence provided by the picker
+    // Assign stable sequential IDs and preserve stable index positions
+    const newImages: UploadedImage[] = accepted.map((file, idx) => {
+      const id = `img-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 9)}`;
       const objectUrl = URL.createObjectURL(file);
       createdBlobUrlsRef.current.add(objectUrl);
       return {
@@ -155,12 +237,55 @@ function Index() {
       };
     });
 
-    // Display immediately without blocking or waiting for heavy base64 conversion / canvas scanning
-    setImages((prev) => [...prev, ...newImages]);
+    // Automatically reverse the newly uploaded batch once so reverse-chronological photo picker batches (5,4,3,2,1) become (1,2,3,4,5)
+    const reversedBatch = [...newImages].reverse();
+
+    // CRITICAL: Append the new reversed batch strictly to the END of existing images (existing images are never re-reversed)
+    setImages((prev) => [...prev, ...reversedBatch]);
     setErrors(({ images: _omit, ...rest }) => rest);
     setResult(null);
 
     if (inputRef.current) inputRef.current.value = "";
+
+    // Asynchronously process the newly added images in-place with Auto Crop
+    processAutoCropForImages(reversedBatch);
+  };
+
+  const processAutoCropForImages = async (targetImages: UploadedImage[]) => {
+    if (targetImages.length === 0) return;
+
+    const concurrency = Math.min(3, targetImages.length);
+    let index = 0;
+    const workers = Array.from({ length: concurrency }, async () => {
+      while (index < targetImages.length) {
+        const item = targetImages[index++];
+        if (!item) continue;
+        try {
+          const res = await autoCropImage(item.originalDataUrl);
+          if (res.isCropped && res.quad) {
+            // Update in-place by matching exact image ID, guaranteeing order remains unchanged
+            setImages((prev) =>
+              prev.map((img) =>
+                img.id === item.id
+                  ? {
+                      ...img,
+                      dataUrl: res.dataUrl,
+                      isCropped: true,
+                      currentQuad: res.quad,
+                      confidence: res.confidence,
+                    }
+                  : img,
+              ),
+            );
+          }
+        } catch {
+          // Keep original if auto-crop fails
+        }
+        await new Promise((r) => setTimeout(r, 0));
+      }
+    });
+
+    await Promise.all(workers);
   };
 
   const removeImage = (id: string) => {
@@ -200,6 +325,12 @@ function Index() {
     });
   };
 
+  const reverseImagesOrder = () => {
+    if (images.length < 2) return;
+    setImages((prev) => [...prev].reverse());
+    notify(t("orderReversedNotify", { count: images.length }));
+  };
+
   const handleQuickRotate = async (id: string, degrees: 90 | -90) => {
     if (rotatingId || isBatchScanning) return;
     const img = images.find((i) => i.id === id);
@@ -227,10 +358,15 @@ function Index() {
         ),
       );
       const pageIdx = images.findIndex((i) => i.id === id);
-      const pageLabel = pageIdx >= 0 ? `Page ${pageIdx + 1}` : "Page";
-      notify(`${pageLabel} rotated ${degrees === 90 ? "right (90°)" : "left (90°)"}`);
+      const pageLabel = pageIdx >= 0 ? t("pageWord", { num: pageIdx + 1 }) : t("pageSingle");
+      notify(
+        t("pageRotatedNotify", {
+          page: pageLabel,
+          direction: degrees === 90 ? t("rotateRightDir") : t("rotateLeftDir"),
+        }),
+      );
     } catch {
-      notify("Failed to rotate page.");
+      notify(t("rotateFailedNotify"));
     } finally {
       setRotatingId(null);
     }
@@ -250,7 +386,7 @@ function Index() {
           : img,
       ),
     );
-    notify("Reverted to original photo.");
+    notify(t("revertedNotify"));
   };
 
   const handleApplyScannerCrop = (updated: {
@@ -273,77 +409,76 @@ function Index() {
           : img,
       ),
     );
-    notify("Page crop and perspective correction applied!");
+    notify(t("cropAppliedNotify"));
   };
 
-  // Batch auto-crop all uncropped images with high confidence
+  // Batch auto-crop all uncropped images
   const handleBatchAutoCrop = async () => {
     if (images.length === 0 || isBatchScanning) return;
     setIsBatchScanning(true);
     let successCount = 0;
-
+    let completedCount = 0;
+    const total = images.length;
     try {
-      const updatedImages = [...images];
-      const total = updatedImages.length;
+      setBatchProgress(t("autoCroppingPages"));
+      const concurrency = Math.min(3, total);
+      let idx = 0;
 
-      // Process in small parallel chunks of 2 for fast off-thread execution while maintaining responsiveness
-      const chunkSize = 2;
-      for (let i = 0; i < total; i += chunkSize) {
-        const chunk = updatedImages.slice(i, i + chunkSize);
-        setBatchProgress(
-          `Scanning pages ${i + 1}–${Math.min(i + chunkSize, total)} of ${total}...`,
-        );
+      const workers = Array.from({ length: concurrency }, async () => {
+        while (idx < total) {
+          const currentIdx = idx++;
+          const item = images[currentIdx];
+          if (!item) continue;
 
-        await Promise.all(
-          chunk.map(async (item, chunkOffset) => {
-            const idx = i + chunkOffset;
-            try {
-              const detection = await detectDocument(item.originalDataUrl);
-              if (detection.isConfident && detection.confidence >= 0.65) {
-                const warped = await warpQuad(item.originalDataUrl, detection.quad, 2200);
-                updatedImages[idx] = {
-                  ...item,
-                  dataUrl: warped.dataUrl,
-                  isCropped: true,
-                  currentQuad: detection.quad,
-                  confidence: detection.confidence,
-                };
-                successCount++;
-              }
-            } catch {
-              // Skip if detection fails
+          try {
+            const res = await autoCropImage(item.originalDataUrl);
+            if (res.isCropped && res.quad) {
+              setImages((prev) =>
+                prev.map((img) =>
+                  img.id === item.id
+                    ? {
+                        ...img,
+                        dataUrl: res.dataUrl,
+                        isCropped: true,
+                        currentQuad: res.quad,
+                        confidence: res.confidence,
+                      }
+                    : img,
+                ),
+              );
+              successCount++;
             }
-          }),
-        );
+          } catch {
+            // skip
+          } finally {
+            completedCount++;
+            setBatchProgress(t("processingPage", { current: completedCount, total }));
+          }
+          await new Promise((r) => setTimeout(r, 0));
+        }
+      });
 
-        // Yield to browser rendering loop between chunks
-        await new Promise((r) => setTimeout(r, 16));
-      }
-
-      setImages(updatedImages);
-      notify(`Auto-scanned ${successCount} of ${images.length} pages.`);
+      await Promise.all(workers);
+      notify(t("autoCropSuccessNotify", { count: successCount, total: images.length }));
     } finally {
       setIsBatchScanning(false);
       setBatchProgress("");
     }
   };
 
-  const activeBranch = profile ? profile.branch : branchInput.trim().toUpperCase();
-  const activeEnrollmentNumber = profile ? profile.enrollmentNumber : enrollmentInput.trim();
-
   const validate = () => {
     const next: Errors = {};
-    if (!activeBranch) next.branch = "Branch is required (e.g. CE)";
-    if (!activeEnrollmentNumber)
-      next.enrollmentNumber = "Enrollment number is required (e.g. 25002170110091)";
-    if (!subject.trim()) next.subject = "Subject is required (e.g. DS)";
-    if (!examPhase.trim()) next.examPhase = "Exam phase is required (e.g. T1)";
-    if (images.length === 0) next.images = "Upload at least one assignment photo";
+    if (!activeBranch) next.branch = t("branchRequiredError");
+    if (!activeEnrollmentNumber) next.enrollmentNumber = t("enrollmentRequiredError");
+    if (!subject.trim()) next.subject = t("subjectRequiredError");
+    if (!examPhase.trim()) next.examPhase = t("examPhaseRequiredError");
+    if (images.length === 0) next.images = t("uploadAtLeastOneError");
     setErrors(next);
     return Object.keys(next).length === 0;
   };
 
   const handleGenerate = async () => {
+    setGenerationError(null);
     setResult(null);
     if (!validate()) {
       if (!profile && (!activeBranch || !activeEnrollmentNumber)) {
@@ -362,6 +497,12 @@ function Index() {
     }
 
     setIsGenerating(true);
+    setGenerationProgress({
+      stage: "preparing",
+      percent: 20,
+      total: images.length,
+    });
+
     try {
       const totalOriginalSize = images.reduce((acc, img) => acc + (img.size || 0), 0);
       const { blob, fileName } = await generateAssignmentPdf(
@@ -374,6 +515,9 @@ function Index() {
         images,
         smartFilterEnabled,
         qualityPreset,
+        (progress) => {
+          setGenerationProgress(progress);
+        },
       );
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
@@ -390,11 +534,13 @@ function Index() {
         pageCount: images.length,
         blob,
       });
-      notify("Assignment PDF created successfully!");
+      setGenerationProgress(null);
+      notify(t("pdfCreatedNotify"));
     } catch (err: unknown) {
       console.error("PDF Generation error:", err);
-      const msg =
-        err instanceof Error ? err.message : "Failed to generate PDF. Please verify your images.";
+      const msg = err instanceof Error ? err.message : t("pdfGenerateFailed");
+      setGenerationError(msg);
+      setGenerationProgress(null);
       setErrors((prev) => ({ ...prev, images: msg }));
       notify(msg);
     } finally {
@@ -437,7 +583,7 @@ function Index() {
     window.setTimeout(() => URL.revokeObjectURL(url), 10000);
 
     window.open("https://api.whatsapp.com/send", "_blank", "noopener,noreferrer");
-    notify("PDF downloaded! Opening WhatsApp so you can select a chat and send your assignment.");
+    notify(t("whatsappNotify"));
   };
 
   const handleManualDownload = () => {
@@ -458,19 +604,35 @@ function Index() {
         <header className="mb-8 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.2em] text-accent-foreground">
-              Student toolkit
+              {t("appTagline")}
             </p>
             <h1 className="mt-2 text-3xl font-bold tracking-tight text-foreground sm:text-4xl">
-              Assignment PDF Maker
+              {t("appTitle")}
             </h1>
-            <p className="mt-2 text-sm text-muted-foreground sm:text-base">
-              Upload assignment photos, auto-detect document borders, perspective crop, and download
-              a submission-ready PDF.
-            </p>
+            <p className="mt-2 text-sm text-muted-foreground sm:text-base">{t("appDescription")}</p>
           </div>
 
-          {/* Student Profile Quick Status / Edit */}
-          <div className="shrink-0 flex items-center">
+          {/* Top Actions: [ Settings ] [ 💬 Feedback ] [ Saved Profile ] */}
+          <div className="shrink-0 flex items-center gap-2 flex-wrap sm:flex-nowrap">
+            <SettingsMenu
+              onOpenFeedback={() => setFeedbackModalOpen(true)}
+              onOpenAdminFeedback={() => setAdminFeedbackModalOpen(true)}
+            />
+
+            <Button
+              id="btn-open-feedback"
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setFeedbackModalOpen(true)}
+              className="h-9 gap-1.5 text-xs font-medium border-border/80 bg-card text-foreground hover:bg-accent/50 shadow-xs"
+              title={t("feedbackBtn")}
+              aria-label={t("feedbackBtn")}
+            >
+              <MessageSquareQuote className="h-4 w-4 text-primary" />
+              <span>💬 {t("feedbackBtn")}</span>
+            </Button>
+
             {profile ? (
               <div className="flex items-center gap-2.5 rounded-xl border border-border/80 bg-card p-2 shadow-xs">
                 <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10 text-primary">
@@ -478,7 +640,9 @@ function Index() {
                 </div>
                 <div className="text-left pr-1">
                   <div className="flex items-center gap-1.5">
-                    <span className="text-xs font-semibold text-foreground">Saved Profile</span>
+                    <span className="text-xs font-semibold text-foreground">
+                      {t("savedProfile")}
+                    </span>
                     <Badge
                       variant="outline"
                       className="text-[9px] px-1 py-0 h-3.5 border-primary/40 text-primary"
@@ -497,10 +661,10 @@ function Index() {
                   size="sm"
                   className="h-8 text-xs text-muted-foreground hover:text-foreground gap-1 border-l border-border pl-2"
                   onClick={() => setProfileModalOpen(true)}
-                  title="Edit Branch & Enrollment Number"
+                  title={t("editProfileTitle")}
                 >
                   <Edit3 className="h-3.5 w-3.5" />
-                  <span>Edit</span>
+                  <span>{t("editProfile")}</span>
                 </Button>
               </div>
             ) : (
@@ -513,7 +677,7 @@ function Index() {
                 onClick={() => setProfileModalOpen(true)}
               >
                 <GraduationCap className="h-4 w-4" />
-                <span>Save Student Profile</span>
+                <span>{t("saveStudentProfile")}</span>
               </Button>
             )}
           </div>
@@ -524,32 +688,32 @@ function Index() {
             {/* Step 1: Upload photos */}
             <Card>
               <CardHeader className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pb-3">
-                <CardTitle className="text-lg">1. Upload assignment photos</CardTitle>
+                <CardTitle className="text-lg">{t("step1Title")}</CardTitle>
                 <div className="flex flex-wrap items-center gap-2">
                   {/* Smart Filter ON/OFF Toggle */}
                   <div
                     id="toggle-smart-filter-container"
                     className="flex items-center gap-2 rounded-lg border border-border bg-secondary/50 px-2.5 py-1 text-xs"
-                    title="Automatically enhances text contrast, exposure, and clarity"
+                    title={t("smartFilterTooltip")}
                   >
                     <Wand2 className="h-3.5 w-3.5 text-primary" />
                     <Label
                       htmlFor="switch-smart-filter"
                       className="cursor-pointer text-xs font-semibold select-none flex items-center gap-1.5"
                     >
-                      <span>Smart Filter</span>
+                      <span>{t("smartFilter")}</span>
                       <Badge
                         variant={smartFilterEnabled ? "default" : "secondary"}
                         className="text-[9px] px-1 py-0 h-4 font-bold uppercase tracking-wider"
                       >
-                        {smartFilterEnabled ? "ON" : "OFF"}
+                        {smartFilterEnabled ? t("on") : t("off")}
                       </Badge>
                     </Label>
                     <Switch
                       id="switch-smart-filter"
                       checked={smartFilterEnabled}
                       onCheckedChange={(checked) => setSmartFilterEnabled(checked)}
-                      aria-label="Toggle Smart Document Filter"
+                      aria-label={t("smartFilter")}
                     />
                   </div>
 
@@ -566,12 +730,12 @@ function Index() {
                       {isBatchScanning ? (
                         <>
                           <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          {batchProgress || "Scanning..."}
+                          {batchProgress || t("scanningPages")}
                         </>
                       ) : (
                         <>
                           <Sparkles className="h-3.5 w-3.5 text-primary" />
-                          Auto-Crop All
+                          {t("autoCropAll")}
                         </>
                       )}
                     </Button>
@@ -594,11 +758,9 @@ function Index() {
                 >
                   <ImagePlus className="h-8 w-8 text-primary" aria-hidden="true" />
                   <span className="mt-3 text-sm font-medium text-foreground">
-                    Tap to add JPG or PNG photos
+                    {t("uploadPrompt")}
                   </span>
-                  <span className="mt-1 text-xs text-muted-foreground">
-                    You can select multiple pages at once
-                  </span>
+                  <span className="mt-1 text-xs text-muted-foreground">{t("uploadSubtext")}</span>
                 </label>
                 <input
                   ref={inputRef}
@@ -614,9 +776,26 @@ function Index() {
                 {/* Uploaded Images List with scanner triggers */}
                 {images.length > 0 && (
                   <div className="mt-5 space-y-3">
-                    <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                      Uploaded Pages ({images.length}) — Ordered 1 to {images.length}
-                    </p>
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                        {t("uploadedPagesHeader", { count: images.length })}
+                      </p>
+                      {images.length >= 2 && (
+                        <Button
+                          id="btn-reverse-page-order"
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={reverseImagesOrder}
+                          disabled={isBatchScanning || isGenerating}
+                          className="h-7 gap-1.5 px-2.5 text-xs font-medium text-foreground hover:bg-secondary border-border/80 cursor-pointer shadow-2xs"
+                          title={t("reverseOrderTooltip")}
+                        >
+                          <ArrowUpDown className="h-3.5 w-3.5 text-primary shrink-0" />
+                          <span>{t("reverseOrder")}</span>
+                        </Button>
+                      )}
+                    </div>
                     <ul className="divide-y divide-border/60 rounded-lg border border-border bg-card">
                       {images.map((image, index) => (
                         <li
@@ -645,19 +824,19 @@ function Index() {
                                     variant="outline"
                                     className="border-emerald-500/40 bg-emerald-500/10 text-[10px] text-emerald-600 dark:text-emerald-400 py-0"
                                   >
-                                    Scanned &amp; Cropped
+                                    {t("scannedAndCropped")}
                                   </Badge>
                                 ) : (
                                   <Badge
                                     variant="secondary"
                                     className="text-[10px] py-0 text-muted-foreground"
                                   >
-                                    Original Photo
+                                    {t("originalPhoto")}
                                   </Badge>
                                 )}
                               </div>
                               <p className="text-[11px] text-muted-foreground">
-                                Page {index + 1} in PDF{" "}
+                                {t("pageInPdf", { num: index + 1 })}{" "}
                                 {image.size ? `· ${formatBytes(image.size)}` : ""}
                               </p>
                             </div>
@@ -673,10 +852,10 @@ function Index() {
                               disabled={isBatchScanning || rotatingId === image.id}
                               onClick={() => setScannerTarget({ image, pageNumber: index + 1 })}
                               className="h-8 gap-1.5 text-xs text-primary hover:text-primary"
-                              title="Scan and adjust 4 corners"
+                              title={t("scanCropBtn")}
                             >
                               <Crop className="h-3.5 w-3.5" />
-                              <span className="hidden sm:inline">Scan / Crop</span>
+                              <span className="hidden sm:inline">{t("scanCropBtn")}</span>
                             </Button>
 
                             {/* Rotation Controls: Left (90° CCW) and Right (90° CW) */}
@@ -689,7 +868,7 @@ function Index() {
                                 disabled={isBatchScanning || rotatingId === image.id}
                                 onClick={() => handleQuickRotate(image.id, -90)}
                                 className="h-7 w-7 text-muted-foreground hover:text-foreground"
-                                title="Rotate Left 90° (Counter-Clockwise)"
+                                title={t("rotateLeftTitle")}
                                 aria-label={`Rotate page ${index + 1} left 90 degrees`}
                               >
                                 {rotatingId === image.id ? (
@@ -707,7 +886,7 @@ function Index() {
                                 disabled={isBatchScanning || rotatingId === image.id}
                                 onClick={() => handleQuickRotate(image.id, 90)}
                                 className="h-7 w-7 text-muted-foreground hover:text-foreground"
-                                title="Rotate Right 90° (Clockwise)"
+                                title={t("rotateRightTitle")}
                                 aria-label={`Rotate page ${index + 1} right 90 degrees`}
                               >
                                 {rotatingId === image.id ? (
@@ -727,7 +906,7 @@ function Index() {
                                 disabled={isBatchScanning || rotatingId === image.id}
                                 onClick={() => handleRevertToOriginal(image.id)}
                                 className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                                title="Revert to Original"
+                                title={t("revertToOriginalTitle")}
                               >
                                 <Undo2 className="h-3.5 w-3.5" />
                               </Button>
@@ -741,7 +920,7 @@ function Index() {
                               onClick={() => moveImage(index, "up")}
                               disabled={index === 0 || isBatchScanning || rotatingId === image.id}
                               className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                              title="Move Up"
+                              title={t("moveUpTitle")}
                             >
                               <ArrowUp className="h-3.5 w-3.5" />
                             </Button>
@@ -758,7 +937,7 @@ function Index() {
                                 rotatingId === image.id
                               }
                               className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                              title="Move Down"
+                              title={t("moveDownTitle")}
                             >
                               <ArrowDown className="h-3.5 w-3.5" />
                             </Button>
@@ -771,7 +950,7 @@ function Index() {
                               disabled={isBatchScanning || rotatingId === image.id}
                               onClick={() => removeImage(image.id)}
                               className="h-8 w-8 text-destructive hover:bg-destructive/10"
-                              title="Delete photo"
+                              title={t("deletePhotoTitle")}
                             >
                               <Trash2 className="h-3.5 w-3.5" />
                             </Button>
@@ -808,18 +987,16 @@ function Index() {
                 <div className="flex items-center justify-between">
                   <CardTitle className="text-lg flex items-center gap-2">
                     <GraduationCap className="h-5 w-5 text-primary" />
-                    2. Submission details
+                    {t("step2Title")}
                   </CardTitle>
                   {profile && (
                     <Badge variant="outline" className="text-xs text-primary bg-primary/5">
-                      Profile Active
+                      {t("profileActive")}
                     </Badge>
                   )}
                 </div>
                 <CardDescription className="text-xs">
-                  {profile
-                    ? "Your Branch and Enrollment Number are saved on this browser. Just enter the Subject and Exam Phase."
-                    : "Enter your Branch and Enrollment Number once. They will be saved on this browser for future assignments."}
+                  {profile ? t("step2DescSaved") : t("step2DescNew")}
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -833,20 +1010,21 @@ function Index() {
                       <div>
                         <div className="flex items-center gap-2">
                           <span className="text-xs font-semibold text-foreground">
-                            Saved Student Profile
+                            {t("savedStudentProfile")}
                           </span>
                           <span className="text-[10px] text-muted-foreground font-normal">
-                            (Saved in browser)
+                            ({t("savedInBrowser")})
                           </span>
                         </div>
                         <div className="flex flex-wrap items-center gap-2 mt-1">
                           <span className="inline-flex items-center gap-1 rounded bg-background px-2 py-0.5 text-xs font-medium border border-border text-foreground">
                             <Building2 className="h-3 w-3 text-primary" />
-                            Branch: <strong className="text-primary">{profile.branch}</strong>
+                            {t("branchLabel")}:{" "}
+                            <strong className="text-primary">{profile.branch}</strong>
                           </span>
                           <span className="inline-flex items-center gap-1 rounded bg-background px-2 py-0.5 text-xs font-medium border border-border text-foreground">
                             <Hash className="h-3 w-3 text-primary" />
-                            Enroll No:{" "}
+                            {t("enrollNoLabel")}:{" "}
                             <strong className="font-mono text-primary">
                               {profile.enrollmentNumber}
                             </strong>
@@ -863,7 +1041,7 @@ function Index() {
                       onClick={() => setProfileModalOpen(true)}
                     >
                       <Edit3 className="h-3 w-3" />
-                      Edit Details
+                      {t("editDetailsBtn")}
                     </Button>
                   </div>
                 ) : (
@@ -873,17 +1051,17 @@ function Index() {
                       <div className="flex items-center gap-1.5">
                         <Building2 className="h-4 w-4 text-primary" />
                         <span className="text-xs font-semibold text-foreground">
-                          1-Time Student Profile Setup
+                          {t("oneTimeSetup")}
                         </span>
                       </div>
                       <span className="text-[10px] text-muted-foreground">
-                        Saves in your browser
+                        {t("savesInBrowser")}
                       </span>
                     </div>
                     <div className="grid gap-3 sm:grid-cols-2">
                       <div className="space-y-1.5">
                         <Label htmlFor="branch" className="text-xs font-semibold">
-                          Branch *
+                          {t("branchRequired")}
                         </Label>
                         <Input
                           id="branch"
@@ -893,7 +1071,7 @@ function Index() {
                             if (errors.branch)
                               setErrors((prev) => ({ ...prev, branch: undefined }));
                           }}
-                          placeholder="e.g. CE, IT, ME"
+                          placeholder={t("branchPlaceholder")}
                           maxLength={20}
                           className="text-xs uppercase"
                           aria-invalid={Boolean(errors.branch)}
@@ -904,7 +1082,7 @@ function Index() {
                       </div>
                       <div className="space-y-1.5">
                         <Label htmlFor="enrollmentNumber" className="text-xs font-semibold">
-                          Enrollment Number *
+                          {t("enrollmentRequired")}
                         </Label>
                         <Input
                           id="enrollmentNumber"
@@ -914,7 +1092,7 @@ function Index() {
                             if (errors.enrollmentNumber)
                               setErrors((prev) => ({ ...prev, enrollmentNumber: undefined }));
                           }}
-                          placeholder="e.g. 25002170110091"
+                          placeholder={t("enrollmentPlaceholder")}
                           maxLength={40}
                           className="text-xs font-mono"
                           aria-invalid={Boolean(errors.enrollmentNumber)}
@@ -941,7 +1119,7 @@ function Index() {
                           }}
                         >
                           <UserCheck className="h-3.5 w-3.5 text-primary" />
-                          Save Details for Future
+                          {t("saveDetailsFuture")}
                         </Button>
                       </div>
                     )}
@@ -952,13 +1130,13 @@ function Index() {
                 <div className="grid gap-4 sm:grid-cols-2 pt-1">
                   <div className="space-y-1.5">
                     <Label htmlFor="subject" className="text-xs font-semibold">
-                      Subject *
+                      {t("subjectRequired")}
                     </Label>
                     <Input
                       id="subject"
                       value={subject}
                       onChange={(e) => setSubject(e.target.value.toUpperCase())}
-                      placeholder="e.g. DS"
+                      placeholder={t("subjectPlaceholder")}
                       maxLength={80}
                       aria-invalid={Boolean(errors.subject)}
                       className="text-sm"
@@ -966,20 +1144,18 @@ function Index() {
                     {errors.subject ? (
                       <p className="text-xs text-destructive">{errors.subject}</p>
                     ) : (
-                      <p className="text-[10px] text-muted-foreground">
-                        Example: DS, Java-2, TOC, DCN
-                      </p>
+                      <p className="text-[10px] text-muted-foreground">{t("subjectExample")}</p>
                     )}
                   </div>
                   <div className="space-y-1.5">
                     <Label htmlFor="examPhase" className="text-xs font-semibold">
-                      Exam Phase *
+                      {t("examPhaseRequired")}
                     </Label>
                     <Input
                       id="examPhase"
                       value={examPhase}
                       onChange={(e) => setExamPhase(e.target.value.toUpperCase())}
-                      placeholder="e.g. T1"
+                      placeholder={t("examPhasePlaceholder")}
                       maxLength={20}
                       aria-invalid={Boolean(errors.examPhase)}
                       className="text-sm"
@@ -987,9 +1163,7 @@ function Index() {
                     {errors.examPhase ? (
                       <p className="text-xs text-destructive">{errors.examPhase}</p>
                     ) : (
-                      <p className="text-[10px] text-muted-foreground">
-                        Example: T1, T2, T3, Assignment-1
-                      </p>
+                      <p className="text-[10px] text-muted-foreground">{t("examPhaseExample")}</p>
                     )}
                   </div>
                 </div>
@@ -1001,11 +1175,13 @@ function Index() {
           <div className="lg:col-span-2">
             <Card className="lg:sticky lg:top-8">
               <CardHeader>
-                <CardTitle className="text-lg">3. Preview &amp; download</CardTitle>
+                <CardTitle className="text-lg">{t("step3Title")}</CardTitle>
                 {images.length > 0 && (
                   <p className="text-xs text-muted-foreground">
-                    {images.length} {images.length === 1 ? "page" : "pages"} will be in the final
-                    PDF
+                    {t("pagesInFinalPdf", {
+                      count: images.length,
+                      pageWord: images.length === 1 ? t("pageSingle") : t("pagePlural"),
+                    })}
                   </p>
                 )}
               </CardHeader>
@@ -1013,7 +1189,7 @@ function Index() {
                 {/* Filename Preview */}
                 <div className="rounded-lg border border-border/80 bg-secondary/30 p-2.5 space-y-1">
                   <span className="text-[10px] uppercase tracking-wider font-semibold text-muted-foreground">
-                    Target Filename:
+                    {t("targetFilename")}
                   </span>
                   <p className="text-xs font-mono font-semibold text-primary break-all">
                     {`${activeBranch || "BRANCH"}_${activeEnrollmentNumber || "ENROLL"}_${subject.trim() || "SUBJECT"}_${examPhase.trim() || "PHASE"}.pdf`}
@@ -1022,7 +1198,7 @@ function Index() {
 
                 {images.length === 0 ? (
                   <p className="rounded-lg bg-secondary/50 px-4 py-6 text-center text-sm text-muted-foreground">
-                    Your uploaded pages will appear here.
+                    {t("emptyPreviewPlaceholder")}
                   </p>
                 ) : (
                   <ul className="grid grid-cols-3 gap-2.5">
@@ -1031,7 +1207,7 @@ function Index() {
                         key={image.id}
                         className="group relative cursor-pointer"
                         onClick={() => setScannerTarget({ image, pageNumber: index + 1 })}
-                        title="Click to open Document Scanner"
+                        title={t("scanCropBtn")}
                       >
                         <img
                           src={image.dataUrl}
@@ -1044,7 +1220,7 @@ function Index() {
                         </span>
                         {image.isCropped && (
                           <span className="absolute right-1 bottom-1 rounded bg-emerald-600/90 px-1 text-[9px] font-bold text-white shadow">
-                            Scanned
+                            {t("scannedBadgeSmall")}
                           </span>
                         )}
                       </li>
@@ -1058,7 +1234,7 @@ function Index() {
                     <div className="flex items-center gap-1.5">
                       <Sliders className="h-3.5 w-3.5 text-primary" />
                       <span className="text-xs font-semibold text-foreground">
-                        Compression &amp; Quality
+                        {t("compressionAndQuality")}
                       </span>
                     </div>
                     <span className="text-[10px] text-muted-foreground font-mono">
@@ -1068,8 +1244,19 @@ function Index() {
 
                   <div className="grid grid-cols-3 gap-1.5 pt-0.5">
                     {(["standard", "high", "compact"] as const).map((presetKey) => {
-                      const preset = QUALITY_PRESETS[presetKey];
                       const isSelected = qualityPreset === presetKey;
+                      const presetLabel =
+                        presetKey === "standard"
+                          ? t("standardPreset")
+                          : presetKey === "high"
+                            ? t("highPreset")
+                            : t("compactPreset");
+                      const presetBadge =
+                        presetKey === "standard"
+                          ? t("standardQualityBadge")
+                          : presetKey === "high"
+                            ? t("highQualityBadge")
+                            : t("compactQualityBadge");
                       return (
                         <button
                           key={presetKey}
@@ -1083,23 +1270,115 @@ function Index() {
                           }`}
                         >
                           <span className="text-xs font-semibold leading-tight flex items-center gap-1">
-                            {preset.label}
+                            {presetLabel}
                           </span>
                           <span className="text-[10px] opacity-80 mt-0.5 leading-none">
-                            {presetKey === "standard"
-                              ? "Balanced"
-                              : presetKey === "high"
-                                ? "Crispest"
-                                : "Smallest"}
+                            {presetBadge}
                           </span>
                         </button>
                       );
                     })}
                   </div>
                   <p className="text-[11px] text-muted-foreground leading-snug">
-                    {QUALITY_PRESETS[qualityPreset].description}
+                    {qualityPreset === "standard"
+                      ? t("standardQualityDesc")
+                      : qualityPreset === "high"
+                        ? t("highQualityDesc")
+                        : t("compactQualityDesc")}
                   </p>
                 </div>
+
+                {/* Granular PDF Generation Progress Indicator */}
+                {isGenerating && (
+                  <div className="space-y-3 rounded-xl border border-primary/30 bg-primary/5 p-3.5 animate-in fade-in duration-200">
+                    <div className="flex items-center justify-between text-xs font-semibold">
+                      <div className="flex items-center gap-2 text-primary min-w-0">
+                        <Loader2 className="h-4 w-4 animate-spin shrink-0" />
+                        <span className="truncate">{getProgressLabel()}</span>
+                      </div>
+                      <span className="font-mono text-primary font-bold text-xs shrink-0 ml-2">
+                        {generationProgress?.percent || 20}%
+                      </span>
+                    </div>
+
+                    {/* Progress Track */}
+                    <div className="h-2.5 w-full overflow-hidden rounded-full bg-secondary/80 border border-border/40">
+                      <div
+                        className="h-full bg-primary transition-all duration-300 ease-out"
+                        style={{ width: `${Math.max(8, generationProgress?.percent || 20)}%` }}
+                      />
+                    </div>
+
+                    {/* Step breakdown */}
+                    <div className="grid grid-cols-4 gap-1 text-[10px] text-muted-foreground pt-0.5">
+                      <div
+                        className={`text-center font-medium truncate ${
+                          generationProgress?.stage === "preparing"
+                            ? "text-primary font-bold"
+                            : (generationProgress?.percent || 0) >= 20
+                              ? "text-foreground"
+                              : ""
+                        }`}
+                      >
+                        1. Prepare
+                      </div>
+                      <div
+                        className={`text-center font-medium truncate ${
+                          generationProgress?.stage === "processing"
+                            ? "text-primary font-bold"
+                            : (generationProgress?.percent || 0) >= 70
+                              ? "text-foreground"
+                              : ""
+                        }`}
+                      >
+                        2. Process
+                      </div>
+                      <div
+                        className={`text-center font-medium truncate ${
+                          generationProgress?.stage === "creating"
+                            ? "text-primary font-bold"
+                            : (generationProgress?.percent || 0) >= 90
+                              ? "text-foreground"
+                              : ""
+                        }`}
+                      >
+                        3. Build
+                      </div>
+                      <div
+                        className={`text-center font-medium truncate ${
+                          generationProgress?.stage === "finalizing"
+                            ? "text-primary font-bold"
+                            : (generationProgress?.percent || 0) >= 100
+                              ? "text-foreground"
+                              : ""
+                        }`}
+                      >
+                        4. Finalize
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* PDF Generation Failure with Retry Option (Work and images preserved) */}
+                {generationError && !isGenerating && (
+                  <div className="space-y-2.5 rounded-lg border border-destructive/40 bg-destructive/10 p-3.5 text-destructive animate-in fade-in duration-200">
+                    <div className="flex items-start gap-2 text-xs font-semibold">
+                      <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                      <span className="leading-snug">{generationError}</span>
+                    </div>
+                    <Button
+                      id="btn-retry-generate-pdf"
+                      type="button"
+                      variant="destructive"
+                      size="sm"
+                      className="w-full text-xs font-semibold shadow-xs cursor-pointer"
+                      onClick={handleGenerate}
+                    >
+                      <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+                      {t("retryGeneratePdf")}
+                    </Button>
+                  </div>
+                )}
 
                 <Button
                   id="btn-generate-pdf"
@@ -1111,12 +1390,12 @@ function Index() {
                   {isGenerating ? (
                     <>
                       <Loader2 className="h-4 w-4 animate-spin" />
-                      Generating PDF…
+                      {getProgressLabel()}
                     </>
                   ) : (
                     <>
                       <FileDown className="h-4 w-4" />
-                      Generate &amp; download PDF
+                      {t("generateDownloadPdf")}
                     </>
                   )}
                 </Button>
@@ -1125,23 +1404,26 @@ function Index() {
                   <div className="space-y-3 rounded-lg border border-emerald-500/40 bg-emerald-500/10 p-4">
                     <p className="flex items-center gap-2 text-sm font-semibold text-foreground">
                       <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                      Your PDF is ready!
+                      {t("pdfReadyTitle")}
                     </p>
                     <p className="break-all text-xs font-medium text-foreground">
                       {result.fileName}
                     </p>
                     <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                       <span>
-                        {result.pageCount} {result.pageCount === 1 ? "page" : "pages"}
+                        {result.pageCount}{" "}
+                        {result.pageCount === 1 ? t("pageSingle") : t("pagePlural")}
                       </span>
                       <span>·</span>
                       <span>
-                        File size:{" "}
+                        {t("fileSize")}:{" "}
                         <strong className="text-foreground">{formatBytes(result.size)}</strong>
                       </span>
                       {result.originalSize && result.originalSize > result.size && (
                         <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700 dark:text-emerald-300">
-                          {Math.round((1 - result.size / result.originalSize) * 100)}% smaller
+                          {t("smallerBadge", {
+                            percent: Math.round((1 - result.size / result.originalSize) * 100),
+                          })}
                         </span>
                       )}
                     </div>
@@ -1153,7 +1435,7 @@ function Index() {
                         className="w-full font-semibold shadow bg-[#25D366] hover:bg-[#20bd5a] text-white"
                         onClick={handleShareWhatsApp}
                       >
-                        📤 Share with WhatsApp
+                        {t("shareWhatsApp")}
                       </Button>
                       <Button
                         id="btn-download-pdf-again"
@@ -1164,7 +1446,7 @@ function Index() {
                         onClick={handleManualDownload}
                       >
                         <FileDown className="mr-1.5 h-3.5 w-3.5" />
-                        Download PDF
+                        {t("downloadPdfAgain")}
                       </Button>
                     </div>
                   </div>
@@ -1193,6 +1475,15 @@ function Index() {
         onClose={() => setProfileModalOpen(false)}
         currentProfile={profile}
         onSave={handleSaveProfile}
+      />
+
+      {/* Feedback Modal */}
+      <FeedbackModal isOpen={feedbackModalOpen} onClose={() => setFeedbackModalOpen(false)} />
+
+      {/* Owner / Admin Feedback Dashboard Modal */}
+      <AdminFeedbackModal
+        isOpen={adminFeedbackModalOpen}
+        onClose={() => setAdminFeedbackModalOpen(false)}
       />
     </main>
   );
